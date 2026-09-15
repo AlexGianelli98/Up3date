@@ -25,6 +25,75 @@ class RemovableList(list):
         super().remove(value)
 
 
+class FakeMaterial(dict):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+
+class FakeCollection:
+    def __init__(self):
+        self.count = 0
+        self.values = {}
+
+    def add(self, count):
+        self.count += count
+
+    def foreach_set(self, attribute, values):
+        self.values[attribute] = list(values)
+
+
+class FakeUVValue:
+    def __init__(self):
+        self.vector = None
+
+
+class FakeUVLayer:
+    def __init__(self, loop_count):
+        self.uv = [FakeUVValue() for _loop in range(loop_count)]
+
+
+class FakeUVLayers:
+    def __init__(self, mesh):
+        self.mesh = mesh
+        self.layers = []
+
+    def new(self, name="UVMap", do_init=True):
+        layer = FakeUVLayer(self.mesh.loops.count)
+        layer.name = name
+        layer.do_init = do_init
+        self.layers.append(layer)
+        return layer
+
+
+class FakeMesh:
+    def __init__(self):
+        self.materials = []
+        self.vertices = FakeCollection()
+        self.loops = FakeCollection()
+        self.polygons = FakeCollection()
+        self.uv_layers = FakeUVLayers(self)
+        self.updated = False
+
+    def update(self):
+        self.updated = True
+
+
+class MeshStore:
+    def __init__(self):
+        self.created = []
+
+    def new(self, _name):
+        mesh = FakeMesh()
+        self.created.append(mesh)
+        return mesh
+
+
+class ObjectStore:
+    def new(self, name, data):
+        return SimpleNamespace(name=name, data=data)
+
+
 @pytest.fixture(autouse=True)
 def blender_state():
     bpy.context.scene = SimpleNamespace(
@@ -59,10 +128,8 @@ def test_clean_list_and_assign_properties():
 
 def test_blender_safe_name_preserves_cityjson_identifiers_without_numeric_suffixes():
     assert scene.blender_safe_name("building-1") == "building-1"
-    assert (
-        scene.blender_safe_name("NL.IMBAG.Pand.0503100000000010")
-        == "NL.IMBAG.Pand_0503100000000010"
-    )
+    expected = "NL.IMBAG.Pand_0503100000000010"
+    assert scene.blender_safe_name("NL.IMBAG.Pand.0503100000000010") == expected
 
 
 def test_remove_scene_objects_clears_world_objects_and_collections():
@@ -100,18 +167,40 @@ def test_clean_buffer_and_geometry_names():
         ["a", "c", "b"],
         [(0, 1), (2,)],
     )
-    assert (
-        cityjson_utils.get_geometry_name(
-            "building-1", SimpleNamespace(type="MultiSurface", lod="2"), 3
-        )
-        == "3: [LoD2] building-1"
+    multisurface_name = cityjson_utils.get_geometry_name(
+        "building-1", SimpleNamespace(type="MultiSurface", lod="2"), 3
     )
-    assert (
-        cityjson_utils.get_geometry_name(
-            "tree-1", SimpleNamespace(type="GeometryInstance"), 0
-        )
-        == "0: [GeometryInstance] tree-1"
+    geometry_instance_name = cityjson_utils.get_geometry_name(
+        "tree-1", SimpleNamespace(type="GeometryInstance"), 0
     )
+    assert multisurface_name == "3: [LoD2] building-1"
+    assert geometry_instance_name == "0: [GeometryInstance] tree-1"
+
+
+def test_create_mesh_object_writes_uv_layer():
+    bpy.data.meshes = MeshStore()
+    bpy.data.objects = ObjectStore()
+    material = SimpleNamespace(name="material")
+
+    obj = scene.create_mesh_object(
+        "textured",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [(0, 1, 2)],
+        [material],
+        [0],
+        [[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]],
+    )
+
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.layers[0]
+    assert mesh.updated is True
+    assert uv_layer.name == "UVMap"
+    assert uv_layer.do_init is False
+    assert [uv.vector for uv in uv_layer.uv] == [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, 1.0),
+    ]
 
 
 def test_bbox_combines_objects_and_restores_axis_translation():
@@ -167,6 +256,24 @@ def test_write_vertices_to_cityjson(world, expected):
     cityjson_utils.write_vertices_to_cityjson(city_object, (1, 2, 3), doc)
 
     assert doc.vertices == [expected]
+
+
+def test_store_semantic_surfaces_ignores_nonsemantic_materials():
+    geometry = MultiSurface(
+        lod="1",
+        semantics=GeometrySemantics(surfaces=[], values=[[]]),
+    )
+    doc = CityJSONDocument(
+        city_objects={"building": GenericCityObject(geometry=[geometry])}
+    )
+    city_object = SimpleNamespace(
+        data=SimpleNamespace(materials=[FakeMaterial("CityJSON texture")])
+    )
+
+    lookup = cityjson_utils.store_semantic_surfaces(doc, city_object, 0, "building")
+
+    assert lookup is None
+    assert geometry.semantics is None
 
 
 def test_remove_vertex_duplicates_updates_geometry_indices():

@@ -107,7 +107,7 @@ def store_semantic_surfaces(
     index: int,
     city_object_id: str,
 ) -> dict[str, int] | None:
-    """Populates geometry semantics from Blender materials and returns a name→index lookup."""
+    """Populate geometry semantics and return a material name to index lookup."""
     if not city_object.data.materials:
         return None
 
@@ -118,12 +118,16 @@ def store_semantic_surfaces(
     for material in city_object.data.materials:
         if material is None:
             continue
-        semantic_type = material["type"]
+        semantic_type = material.get("type")
         if not isinstance(semantic_type, str):
             continue
         geom.semantics.surfaces.append(Semantics(type=semantic_type))
         semantic_surface_lookup[material.name] = semantic_surface_index
         semantic_surface_index += 1
+
+    if not semantic_surface_lookup:
+        geom.semantics = None
+        return None
 
     return semantic_surface_lookup
 
@@ -139,6 +143,8 @@ def link_face_semantic_surface(
     """Links a mesh face to its corresponding semantic surface index."""
     if not city_object.data.materials:
         return
+    if semantic_surface_lookup is None:
+        return
     city_object_model = cast(GeometryOwner, doc.city_objects[city_object_id])
     geom = city_object_model.geometry[index]
     material = city_object.data.materials[face.material_index]
@@ -147,44 +153,39 @@ def link_face_semantic_surface(
         return
 
     name = material.name
-    assert semantic_surface_lookup is not None
+    if name not in semantic_surface_lookup:
+        geom.semantics.values[0].append(None)
+        return
     geom.semantics.values[0].append(semantic_surface_lookup[name])
 
 
 def write_vertices_to_cityjson(
     city_object: BlenderObject, vertex: Vector, doc: CityJSONDocument
 ) -> None:
-    """Writes a vertex to doc.vertices after translating to the original CRS position."""
+    """Write a vertex after translating it to the original CRS position."""
     coord = city_object.matrix_world @ vertex
-    if (
-        "transformed" in bpy.context.scene.world
-        and "Axis_Origin_X_translation" in bpy.context.scene.world
-    ):
-        # Translate back to original CRS coordinates, then reverse the quantisation transform
+    world = bpy.context.scene.world
+    has_axis_translation = "Axis_Origin_X_translation" in world
+    if "transformed" in world and has_axis_translation:
+        # Translate back to original CRS, then reverse the quantisation transform.
         x, y, z = (
-            coord[0] - bpy.context.scene.world["Axis_Origin_X_translation"],
-            coord[1] - bpy.context.scene.world["Axis_Origin_Y_translation"],
-            coord[2] - bpy.context.scene.world["Axis_Origin_Z_translation"],
+            coord[0] - world["Axis_Origin_X_translation"],
+            coord[1] - world["Axis_Origin_Y_translation"],
+            coord[2] - world["Axis_Origin_Z_translation"],
         )
-        x = round(
-            (x - bpy.context.scene.world["transform.X_translate"])
-            / (bpy.context.scene.world["transform.X_scale"] or 1)
-        )
-        y = round(
-            (y - bpy.context.scene.world["transform.Y_translate"])
-            / (bpy.context.scene.world["transform.Y_scale"] or 1)
-        )
-        z = round(
-            (z - bpy.context.scene.world["transform.Z_translate"])
-            / (bpy.context.scene.world["transform.Z_scale"] or 1)
-        )
+        x_scale = world["transform.X_scale"] or 1
+        y_scale = world["transform.Y_scale"] or 1
+        z_scale = world["transform.Z_scale"] or 1
+        x = round((x - world["transform.X_translate"]) / x_scale)
+        y = round((y - world["transform.Y_translate"]) / y_scale)
+        z = round((z - world["transform.Z_translate"]) / z_scale)
         doc.vertices.append([x, y, z])
-    elif "Axis_Origin_X_translation" in bpy.context.scene.world:
+    elif has_axis_translation:
         doc.vertices.append(
             [
-                coord[0] - bpy.context.scene.world["Axis_Origin_X_translation"],
-                coord[1] - bpy.context.scene.world["Axis_Origin_Y_translation"],
-                coord[2] - bpy.context.scene.world["Axis_Origin_Z_translation"],
+                coord[0] - world["Axis_Origin_X_translation"],
+                coord[1] - world["Axis_Origin_Y_translation"],
+                coord[2] - world["Axis_Origin_Z_translation"],
             ]
         )
     else:
@@ -193,7 +194,8 @@ def write_vertices_to_cityjson(
 
 def remove_vertex_duplicates(doc: CityJSONDocument, precision: int = 3) -> int:
     """Finds all duplicate vertices within a given precision and merges them.
-    Adapted from https://github.com/cityjson/cjio/blob/faf422afe94b4787aeffa9b2e53ee71b32546320/cjio/cityjson.py#L1208
+
+    Adapted from cjio's CityJSON vertex deduplication implementation.
     """
     if doc.transform is not None:
         precision = 0
@@ -277,15 +279,9 @@ def export_parent_child(doc: CityJSONDocument) -> None:
             child_id = get_cityjson_id(city_object)
             parent_co = doc.city_objects.get(parent_id)
             child_co = doc.city_objects.get(child_id)
-            if (
-                parent_co is not None
-                and hasattr(parent_co, "children")
-                and child_id not in parent_co.children
-            ):
-                parent_co.children.append(child_id)
-            if (
-                child_co is not None
-                and hasattr(child_co, "parents")
-                and parent_id not in child_co.parents
-            ):
-                child_co.parents.append(parent_id)
+            if parent_co is not None and hasattr(parent_co, "children"):
+                if child_id not in parent_co.children:
+                    parent_co.children.append(child_id)
+            if child_co is not None and hasattr(child_co, "parents"):
+                if parent_id not in child_co.parents:
+                    child_co.parents.append(parent_id)

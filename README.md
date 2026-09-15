@@ -39,9 +39,14 @@ geometry attached so they can be written back during export. Their geometry is
 not currently expanded into editable Blender meshes.
 
 Appearance, geometry templates, and extensions are preserved when exporting an
-imported scene, but textures and CityJSON material definitions are not applied
-as Blender materials. Semantic surfaces are represented using Blender
-materials instead.
+imported scene. During import, CityJSON appearance textures and UV coordinates
+are applied to the editable mesh geometry types that Up3date already expands:
+`MultiSurface`, `CompositeSurface`, and `Solid`. Texture image paths are
+resolved relative to the imported CityJSON file when they are not absolute.
+Remote texture URLs and missing or inconsistent texture data are skipped with a
+fallback to the semantic-surface or City Object materials selected in the import
+options. `CompositeSolid`, `MultiSolid`, geometry templates, and interior rings
+are preserved but are not expanded into textured editable meshes.
 
 ## Testing datasets
 
@@ -77,6 +82,10 @@ import. The file selector provides these options:
   represented independently when materials are shared.
 - **Clean scene**: remove existing Blender objects, collections, and stored
   CityJSON scene properties before importing.
+- **Import textures**: apply CityJSON `appearance.textures` and
+  `vertices-texture` UV maps when they are present and reference local image
+  files. When disabled, appearance data is still preserved for export but is
+  not applied visually in Blender.
 
 The importer applies a CityJSON `transform` to recover real-world
 coordinates, then translates the model near the scene origin for Blender.

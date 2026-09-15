@@ -92,6 +92,7 @@ def create_mesh_object(
     faces: Sequence[Sequence[int]],
     materials: Sequence[BlenderMaterial],
     material_indices: Sequence[int | None],
+    uvs_by_face: Sequence[Sequence[tuple[float, float]] | None] | None = None,
 ) -> BlenderObject:
     """Returns a mesh blender object"""
 
@@ -123,18 +124,45 @@ def create_mesh_object(
         mesh_data.polygons.foreach_set("loop_start", loop_starts)
         mesh_data.polygons.foreach_set("loop_total", loop_totals)
         if len(material_indices) == len(faces):
-            safe_material_indices = [
-                material_index
-                if isinstance(material_index, int)
-                and 0 <= material_index < len(materials)
-                else 0
-                for material_index in material_indices
-            ]
+            safe_material_indices = []
+            for material_index in material_indices:
+                if not isinstance(material_index, int):
+                    safe_material_indices.append(0)
+                elif material_index < 0 or material_index >= len(materials):
+                    safe_material_indices.append(0)
+                else:
+                    safe_material_indices.append(material_index)
             mesh_data.polygons.foreach_set("material_index", safe_material_indices)
         elif len(material_indices) > len(faces):
-            print(
-                f"Object {name} has {len(faces)} faces but {len(material_indices)} semantic surfaces!"
+            message = (
+                f"Object {name} has {len(faces)} faces but "
+                f"{len(material_indices)} semantic surfaces!"
             )
+            print(message)
+
+        if uvs_by_face is not None and len(uvs_by_face) == len(faces):
+            textured_faces = any(face_uvs is not None for face_uvs in uvs_by_face)
+            if textured_faces:
+                uv_layer = mesh_data.uv_layers.new(name="UVMap", do_init=False)
+                uv_values = getattr(uv_layer, "uv", None)
+                uv_data = getattr(uv_layer, "data", None)
+                loop_index = 0
+                for face, face_uvs in zip(faces, uvs_by_face, strict=False):
+                    if face_uvs is not None and len(face_uvs) == len(face):
+                        valid_face_uvs = face_uvs
+                    else:
+                        valid_face_uvs = None
+                    for corner_index in range(len(face)):
+                        coords = (
+                            valid_face_uvs[corner_index]
+                            if valid_face_uvs is not None
+                            else (0.0, 0.0)
+                        )
+                        if uv_values is not None:
+                            uv_values[loop_index].vector = coords
+                        elif uv_data is not None:
+                            uv_data[loop_index].uv = coords
+                        loop_index += 1
 
         mesh_data.update()
 

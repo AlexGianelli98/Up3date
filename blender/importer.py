@@ -16,6 +16,7 @@ from ..models.geomtemplates import GeometryInstance
 from .blender_types import (
     BlenderObject,
 )
+from .appearance import AppearanceImporter
 from .cityjson_utils import (
     clean_buffer,
     coord_translate_axis_origin,
@@ -66,12 +67,15 @@ class CityJSONImporter:
         material_type: str,
         reuse_materials: bool = True,
         clear_scene: bool = True,
+        import_textures: bool = True,
     ) -> None:
         self.filepath = filepath
         self.clear_scene = clear_scene
+        self.import_textures = import_textures
 
         self.data: dict[str, Any] = {}
         self.document: CityJSONDocument | None = None
+        self.appearance_importer: AppearanceImporter | None = None
         self.vertices: Sequence[Sequence[float]] = ()
         self.material_factory: MaterialFactory
 
@@ -89,6 +93,12 @@ class CityJSONImporter:
         with open(self.filepath) as json_file:
             self.data = json.load(json_file)
         self.document = CityJSONDocument.from_dict(self.data)
+        if self.import_textures and self.document.appearance is not None:
+            self.appearance_importer = AppearanceImporter(
+                self.document.appearance, self.filepath
+            )
+        else:
+            self.appearance_importer = None
 
     def prepare_vertices(self) -> None:
         """Prepares the vertices by applying any required transformations"""
@@ -171,6 +181,14 @@ class CityJSONImporter:
         mats, values = self.material_factory.get_materials(
             city_object=obj, geometry=geom
         )
+        uvs_by_face = None
+        if self.appearance_importer is not None:
+            applied_appearance = self.appearance_importer.apply_to_mesh(
+                cast(GeometryPrimitive, geom), bound, mats, values
+            )
+            mats = applied_appearance.materials
+            values = applied_appearance.material_indices
+            uvs_by_face = applied_appearance.uvs_by_face
 
         geom_obj = create_mesh_object(
             get_geometry_name(theid, geom, index),
@@ -178,6 +196,7 @@ class CityJSONImporter:
             temp_bound,
             mats,
             values,
+            uvs_by_face,
         )
 
         geom_obj["lod"] = str(geom.lod)

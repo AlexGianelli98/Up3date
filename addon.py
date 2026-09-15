@@ -55,6 +55,12 @@ class ImportCityJSON(Operator, ImportHelper):
         default=True,
     )
 
+    import_textures: BoolProperty(
+        name="Import textures",
+        description="Apply CityJSON appearance textures and UV maps when available",
+        default=True,
+    )
+
     def execute(self, context: BlenderContext) -> set[str]:
         """Executes the import process"""
 
@@ -63,6 +69,7 @@ class ImportCityJSON(Operator, ImportHelper):
             material_type=self.material_type,
             reuse_materials=self.reuse_materials,
             clear_scene=self.clean_scene,
+            import_textures=getattr(self, "import_textures", True),
         )
 
         return parser.execute()

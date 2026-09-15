@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -68,6 +69,68 @@ class BlenderIntegrationTests(unittest.TestCase):
         self.assertEqual(tuple(mesh_object.data.polygons[0].vertices), (0, 1, 2))
         self.assertIs(mesh_object.data.materials[0], material)
         self.assertIn(mesh_object, collection.objects.values())
+
+    def test_import_cityjson_texture_and_uvs(self) -> None:
+        cityjson = {
+            "type": "CityJSON",
+            "version": "2.0",
+            "appearance": {
+                "textures": [{"type": "PNG", "image": "textures/facade.png"}],
+                "vertices-texture": [[0, 0], [1, 0], [0, 1]],
+                "default-theme-texture": "rgbTexture",
+            },
+            "CityObjects": {
+                "building-1": {
+                    "type": "Building",
+                    "geometry": [
+                        {
+                            "type": "MultiSurface",
+                            "lod": "2",
+                            "boundaries": [[[0, 1, 2]]],
+                            "semantics": {
+                                "surfaces": [{"type": "WallSurface"}],
+                                "values": [0],
+                            },
+                            "texture": {"rgbTexture": {"values": [[[0, 0, 1, 2]]]}},
+                        }
+                    ],
+                }
+            },
+            "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+        }
+        png_1x1 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l"
+            "EQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            texture_dir = temp_path / "textures"
+            texture_dir.mkdir()
+            (texture_dir / "facade.png").write_bytes(base64.b64decode(png_1x1))
+            input_path = temp_path / "textured.city.json"
+            input_path.write_text(json.dumps(cityjson), encoding="utf-8")
+
+            CityJSONImporter(
+                str(input_path),
+                material_type="SURFACES",
+                reuse_materials=False,
+                clear_scene=True,
+            ).execute()
+
+        geometry = bpy.data.objects["0: [LoD2] building-1"]
+        polygon = geometry.data.polygons[0]
+        material = geometry.data.materials[polygon.material_index]
+        uv_layer = geometry.data.uv_layers[0]
+
+        self.assertEqual(material["type"], "WallSurface")
+        self.assertEqual(material["cityjson_texture_index"], 0)
+        self.assertEqual(material["cityjson_texture_image"], "textures/facade.png")
+        self.assertIn("facade.png", {image.name for image in bpy.data.images})
+        self.assertEqual(
+            [tuple(uv.vector) for uv in uv_layer.uv],
+            [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+        )
 
     def test_addon_registration_and_operator(self) -> None:
         Up3date.register()

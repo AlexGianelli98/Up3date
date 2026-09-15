@@ -121,13 +121,16 @@ def test_parse_geometry_builds_mesh_and_properties(monkeypatch):
     created = FakeBlenderObject()
     captured = {}
 
-    def create_mesh_object(name, vertices, faces, materials, material_indices):
+    def create_mesh_object(
+        name, vertices, faces, materials, material_indices, uvs_by_face=None
+    ):
         captured.update(
             name=name,
             vertices=vertices,
             faces=faces,
             materials=materials,
             material_indices=material_indices,
+            uvs_by_face=uvs_by_face,
         )
         return created
 
@@ -145,6 +148,7 @@ def test_parse_geometry_builds_mesh_and_properties(monkeypatch):
         "faces": [(0, 1, 2)],
         "materials": ["material"],
         "material_indices": [0],
+        "uvs_by_face": None,
     }
     assert created == {"lod": "2", "type": "MultiSurface"}
 
