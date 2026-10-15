@@ -13,7 +13,7 @@ from Up3date.blender.material import (
     CityObjectTypeMaterialFactory,
     ReuseMaterialFactory,
 )
-from Up3date.models.city_objects import Building, GenericCityObject
+from Up3date.models.city_objects import Building, BuildingPart, GenericCityObject
 from Up3date.models.cityjson import CityJSONDocument, Transform
 from Up3date.models.geomprimitives import MultiSurface
 
@@ -22,6 +22,8 @@ class FakeBlenderObject(dict):
     def __init__(self, name="object", **properties):
         super().__init__(properties)
         self.name = name
+        self.type = "MESH"
+        self.parent = None
         self.data = SimpleNamespace(materials=[], vertices=[], polygons=[])
 
 
@@ -153,6 +155,72 @@ def test_parse_geometry_builds_mesh_and_properties(monkeypatch):
     assert created == {"lod": "2", "type": "MultiSurface"}
 
 
+@pytest.mark.parametrize(
+    "geometry_types", [[], ["EMPTY"], ["MESH"], ["MESH", "MESH"], ["EMPTY", "MESH"]]
+)
+@pytest.mark.parametrize("with_attributes", [False, True])
+def test_importer_assigns_attributes_to_each_mesh(
+    monkeypatch, geometry_types, with_attributes
+):
+    attributes = {"height": 12, "address": {"city": "Delft"}} if with_attributes else {}
+    expected = (
+        {"attributes.height": 12, "attributes.address.city": "Delft"}
+        if with_attributes
+        else {}
+    )
+    parser = importer.CityJSONImporter("city.json", "CITY_OBJECTS", clear_scene=False)
+    parser.document = CityJSONDocument(
+        city_objects={
+            "building-1": Building(
+                attributes=attributes,
+                geometry=[
+                    MultiSurface(lod=str(index)) for index in range(len(geometry_types))
+                ],
+            )
+        }
+    )
+    parent = FakeBlenderObject("building-1")
+    parent.type = "EMPTY"
+    geometries = []
+    linked = []
+    collection = SimpleNamespace(objects=SimpleNamespace(link=linked.append))
+    bpy.context.scene.collection = collection
+
+    def parse_geometry(objid, _obj, geometry, index):
+        result = FakeBlenderObject(
+            f"geometry-{index}", type=geometry.type, lod=geometry.lod
+        )
+        result.type = geometry_types[index]
+        geometries.append(result)
+        return result
+
+    monkeypatch.setattr(parser, "load_data", lambda: None)
+    monkeypatch.setattr(parser, "prepare_vertices", lambda: None)
+    monkeypatch.setattr(parser, "parse_geometry", parse_geometry)
+    monkeypatch.setattr(importer, "create_empty_object", lambda _name: parent)
+    monkeypatch.setattr(importer, "get_collection", lambda _name: collection)
+
+    assert parser.execute() == {"FINISHED"}
+    assert parent["type"] == "Building"
+    assert parent["cityjson_id"] == "building-1"
+    assert linked == [parent, *geometries]
+    parent_attributes = {
+        key: value for key, value in parent.items() if key.startswith("attributes.")
+    }
+    assert parent_attributes == ({} if "MESH" in geometry_types else expected)
+    for index, geometry in enumerate(geometries):
+        assert geometry.parent is parent
+        assert geometry["cityjson_id"] == "building-1"
+        assert geometry["type"] == "MultiSurface"
+        assert geometry["lod"] == str(index)
+        actual = {
+            key: value
+            for key, value in geometry.items()
+            if key.startswith("attributes.")
+        }
+        assert actual == (expected if geometry.type == "MESH" else {})
+
+
 def test_exporter_creates_typed_city_object_from_custom_properties():
     city_object = FakeBlenderObject(
         type="Building",
@@ -191,6 +259,137 @@ def test_exporter_preserves_existing_geometry_and_relationships():
     assert result.geometry == [geometry]
     assert result.parents == ["parent"]
     assert result.geographical_extent == [0, 0, 0, 1, 1, 1]
+
+
+@pytest.mark.parametrize("legacy", [{}, {"height": 1, "stale": "ignored"}])
+def test_export_mesh_attributes_reads_copies_and_preserves_structure(legacy):
+    geometry = MultiSurface(lod="1")
+    doc = CityJSONDocument(
+        city_objects={
+            "building-1": Building(attributes=legacy, geometry=[geometry]),
+            "part-1": BuildingPart(parents=["building-1"]),
+        }
+    )
+    meshes = {
+        "building-1": [
+            FakeBlenderObject(
+                "first",
+                type="MultiSurface",
+                lod="1",
+                **{
+                    "attributes.height": 12,
+                    "attributes.address.city": "Delft",
+                    "attributes.values": idprop.types.IDPropertyArray([1, 2]),
+                },
+            ),
+            FakeBlenderObject(
+                "second",
+                **{
+                    "attributes.height": 12,
+                    "attributes.address.city": "Delft",
+                    "attributes.values": [1, 2],
+                },
+            ),
+        ],
+        "part-1": [FakeBlenderObject("part", **{"attributes.height": 3})],
+    }
+
+    exporter.CityJSONExporter.export_mesh_attributes(meshes, doc)
+
+    building = doc.city_objects["building-1"]
+    assert isinstance(building, Building)
+    assert building.geometry == [geometry]
+    assert building.attributes == {
+        "height": 12,
+        "address": {"city": "Delft"},
+        "values": [1, 2],
+    }
+    assert doc.city_objects["part-1"].attributes == {"height": 3}
+    assert doc.city_objects["part-1"].parents == ["building-1"]
+
+
+@pytest.mark.parametrize("mesh_count", [0, 1, 2])
+def test_export_mesh_attributes_preserves_legacy_without_mesh_attributes(mesh_count):
+    doc = CityJSONDocument(
+        city_objects={"building-1": Building(attributes={"height": 12})}
+    )
+    meshes = [FakeBlenderObject(f"mesh-{index}") for index in range(mesh_count)]
+
+    exporter.CityJSONExporter.export_mesh_attributes({"building-1": meshes}, doc)
+
+    assert doc.city_objects["building-1"].attributes == {"height": 12}
+
+
+@pytest.mark.parametrize("mesh_first", [False, True])
+def test_exporter_reads_mesh_attributes_regardless_of_object_order(
+    monkeypatch, tmp_path, mesh_first
+):
+    parent = FakeBlenderObject(
+        "building-1", type="Building", **{"attributes.height": 1}
+    )
+    parent.type = "EMPTY"
+    mesh = FakeBlenderObject(
+        "renamed geometry",
+        type="MultiSurface",
+        lod="1",
+        cityjson_id="building-1",
+        **{"attributes.height": 12},
+    )
+    mesh.parent = parent
+    monkeypatch.setattr(
+        bpy.data,
+        "objects",
+        [mesh, parent] if mesh_first else [parent, mesh],
+        raising=False,
+    )
+    monkeypatch.setattr(exporter, "export_metadata", lambda _doc: None)
+    output_path = tmp_path / "output.city.json"
+
+    result = exporter.CityJSONExporter(
+        str(output_path), check_for_duplicates=False
+    ).execute()
+
+    assert result == {"FINISHED"}
+    building = json.loads(output_path.read_text())["CityObjects"]["building-1"]
+    assert building["type"] == "Building"
+    assert building["attributes"] == {"height": 12}
+    assert len(building["geometry"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"attributes.height": 12}, {"attributes.height": 13}),
+        ({"attributes.height": 12}, {}),
+        ({}, {"attributes.height": 12}),
+        ({"attributes.height": None}, {"attributes.height": 12}),
+        ({"attributes.height": None}, {}),
+        ({}, {"attributes.height": None}),
+    ],
+)
+def test_exporter_rejects_attribute_conflicts_without_overwriting(
+    monkeypatch, tmp_path, first, second
+):
+    meshes = [
+        FakeBlenderObject(
+            name,
+            type="MultiSurface",
+            lod="1",
+            cityjson_id="building-1",
+            **properties,
+        )
+        for name, properties in [("first", first), ("second", second)]
+    ]
+    monkeypatch.setattr(bpy.data, "objects", meshes, raising=False)
+    output_path = tmp_path / "existing.city.json"
+    output_path.write_text("original")
+
+    with pytest.raises(
+        ValueError, match=r"attributes.height.*building-1.*first.*second"
+    ):
+        exporter.CityJSONExporter(str(output_path)).execute()
+
+    assert output_path.read_text() == "original"
 
 
 def test_create_mesh_structure_adds_geometry_and_semantics():

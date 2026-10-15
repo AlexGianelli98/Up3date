@@ -102,9 +102,11 @@ starting an import or export.
 ![Accessing the semantics of LoD2 (or higher) geometries](docs/images/semantics.png)
 ![The translation parameters with the CRS information](docs/images/world_properties.png)
 
-City Object attributes are available under an object's `Object Properties >
-Custom Properties`. Semantic surface properties are available on the material
-assigned to a mesh face.
+City Object attributes are available under each mesh object's `Object Properties >
+Custom Properties`, with names such as `attributes.measuredHeight`. Every geometry
+or LoD receives its own copy. The parent Empty retains the City Object type and
+hierarchy; attributes stay on the Empty only when no actual mesh is created.
+Semantic surface properties are available on the material assigned to a mesh face.
 
 ### Exporting a CityJSON file
 
@@ -115,17 +117,22 @@ structure:
 
 1. Create an **Empty** for each City Object. Name it with the CityJSON object
    ID and add a custom property `type` such as `Building`, `Road`, or
-   `GenericCityObject`. Add CityJSON attributes with the prefix
-   `attributes.`; for example, `attributes.measuredHeight`. Nested attributes
-   use dots, such as `attributes.address.postalCode`.
+  `GenericCityObject`.
 2. Create one **Mesh** child per geometry. Add string custom properties
    `type` and `lod`. `type` must be `MultiSurface`, `CompositeSurface`, or
    `Solid` for geometry edited as a Blender mesh. For example, use `lod: 2`
-   and `type: MultiSurface`.
+  and `type: MultiSurface`. Add CityJSON attributes to each mesh with the prefix
+  `attributes.`, for example `attributes.measuredHeight`. Nested attributes use
+  dots, such as `attributes.address.postalCode`.
 3. To export semantic surfaces, assign materials to mesh faces and add a
    string custom property `type` to each material, for example
    `type: WallSurface` or `type: RoofSurface`.
 4. Export the scene.
+
+The exporter still accepts attributes on Empty objects in older scenes. Mesh
+attributes take precedence when present. Copies on meshes of the same City Object
+are not synchronized automatically and must agree; conflicting or missing values
+between copies stop the export with an error before the output file is written.
 
 The exporter can remove duplicate vertices. Its **Remove vertex duplicates**
 option is enabled by default; **Precision** controls the decimal precision

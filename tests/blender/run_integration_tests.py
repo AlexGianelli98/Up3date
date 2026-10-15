@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import bpy
 
@@ -51,6 +52,93 @@ class BlenderIntegrationTests(unittest.TestCase):
         if self._addon_registered:
             addon.unregister()
         remove_scene_objects()
+
+    def assert_imported_attributes(self, source: dict[str, Any]) -> tuple[int, int]:
+        def flatten(
+            values: dict[str, Any], prefix: str, result: dict[str, Any]
+        ) -> None:
+            for key, value in values.items():
+                full_name = f"{prefix}.{key}"
+                if isinstance(value, dict):
+                    flatten(value, full_name, result)
+                else:
+                    self.assertLessEqual(len(full_name.encode("utf-8")), 63)
+                    self.assertNotIn(full_name, result, f"Ambiguous key: {full_name}")
+                    result[full_name] = value
+
+        def normalize(value: Any) -> Any:
+            if hasattr(value, "to_dict"):
+                value = value.to_dict()
+            elif hasattr(value, "to_list"):
+                value = value.to_list()
+            if isinstance(value, dict):
+                return {key: normalize(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [normalize(item) for item in value]
+            return value
+
+        expected = {}
+        for object_id, city_object in source["CityObjects"].items():
+            properties: dict[str, Any] = {}
+            flatten(city_object.get("attributes", {}), "attributes", properties)
+            expected[object_id] = properties
+
+        mesh_count = 0
+        attribute_count = 0
+        mesh_ids = set()
+        attributed_ids = set()
+        containers = {}
+        for obj in bpy.data.objects:
+            object_id = obj.get("cityjson_id")
+            self.assertIn(object_id, expected)
+            city_object = source["CityObjects"][object_id]
+            if obj.type == "EMPTY" and obj.get("type") == city_object["type"]:
+                containers[object_id] = obj
+            if obj.type != "MESH":
+                continue
+            actual = {
+                key: normalize(value)
+                for key, value in obj.items()
+                if key.startswith("attributes.")
+            }
+            self.assertEqual(actual, expected[object_id], f"{object_id}: {obj.name}")
+            self.assertFalse(
+                any(key.startswith("attributes.") for key, _value in obj.data.items())
+            )
+            self.assertEqual(obj.parent.get("cityjson_id"), object_id)
+            self.assertIn(
+                (obj.get("type"), obj.get("lod")),
+                {
+                    (geometry["type"], str(geometry.get("lod")))
+                    for geometry in city_object.get("geometry", [])
+                },
+            )
+            mesh_count += 1
+            attribute_count += len(actual)
+            mesh_ids.add(object_id)
+            if actual:
+                attributed_ids.add(object_id)
+
+        self.assertEqual(set(containers), set(expected))
+        fallback_count = 0
+        for object_id, container in containers.items():
+            actual = {
+                key: normalize(value)
+                for key, value in container.items()
+                if key.startswith("attributes.")
+            }
+            self.assertEqual(
+                actual, {} if object_id in mesh_ids else expected[object_id]
+            )
+            if object_id not in mesh_ids and actual:
+                fallback_count += 1
+        print(
+            f"Verified post-import attributes: {mesh_count} meshes, "
+            f"{len(attributed_ids)} CityObjects with attributes, "
+            f"{attribute_count} properties, {fallback_count} fallback containers",
+            flush=True,
+        )
+        return mesh_count, attribute_count
 
     def test_create_mesh_object_and_collection(self) -> None:
         material = bpy.data.materials.new("WallSurface")
@@ -186,7 +274,28 @@ class BlenderIntegrationTests(unittest.TestCase):
             "CityObjects": {
                 "building-1": {
                     "type": "Building",
-                    "attributes": {"height": 12},
+                    "attributes": {
+                        "height": 12,
+                        "address": {"city": "Delft"},
+                        "levels": [1, 2],
+                    },
+                    "geometry": [
+                        {
+                            "type": "MultiSurface",
+                            "lod": "1",
+                            "boundaries": [[[0, 1, 2]]],
+                        },
+                        {
+                            "type": "MultiSurface",
+                            "lod": "2",
+                            "boundaries": [[[0, 1, 2]]],
+                        },
+                    ],
+                },
+                "part-1": {
+                    "type": "BuildingPart",
+                    "parents": ["building-1"],
+                    "attributes": {"height": 3},
                     "geometry": [
                         {
                             "type": "MultiSurface",
@@ -194,7 +303,11 @@ class BlenderIntegrationTests(unittest.TestCase):
                             "boundaries": [[[0, 1, 2]]],
                         }
                     ],
-                }
+                },
+                "no-geometry": {
+                    "type": "Building",
+                    "attributes": {"name": "No mesh"},
+                },
             },
             "vertices": [[10, 20, 0], [11, 20, 0], [10, 21, 0]],
         }
@@ -215,10 +328,12 @@ class BlenderIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(import_result, {"FINISHED"})
+            self.assert_imported_attributes(cityjson)
             parent = bpy.data.objects["building-1"]
             geometry = bpy.data.objects["0: [LoD1] building-1"]
             self.assertEqual(parent["type"], "Building")
-            self.assertEqual(parent["attributes.height"], 12)
+            self.assertNotIn("attributes.height", parent)
+            self.assertEqual(geometry["attributes.height"], 12)
             self.assertIs(geometry.parent, parent)
             self.assertEqual(len(geometry.data.polygons), 1)
 
@@ -234,9 +349,13 @@ class BlenderIntegrationTests(unittest.TestCase):
 
         self.assertEqual(export_result, {"FINISHED"})
         self.assertEqual(exported["CityObjects"]["building-1"]["type"], "Building")
-        self.assertEqual(
-            exported["CityObjects"]["building-1"]["attributes"]["height"], 12
-        )
+        for object_id, city_object in cityjson["CityObjects"].items():
+            self.assertEqual(
+                exported["CityObjects"][object_id]["attributes"],
+                city_object["attributes"],
+            )
+        self.assertEqual(len(exported["CityObjects"]["building-1"]["geometry"]), 2)
+        self.assertEqual(exported["CityObjects"]["part-1"]["parents"], ["building-1"])
         self.assertEqual(
             exported["CityObjects"]["building-1"]["geometry"][0]["type"],
             "MultiSurface",
@@ -245,8 +364,13 @@ class BlenderIntegrationTests(unittest.TestCase):
 
     def test_real_datasets_round_trip(self) -> None:
         data_dir = PROJECT_ROOT / "tests" / "data"
+        input_paths = sorted(data_dir.glob("*.city.json"))
+        external_path = os.environ.get("UP3DATE_TEST_CITYJSON")
+        if external_path:
+            self.assertTrue(Path(external_path).is_file(), external_path)
+            input_paths.append(Path(external_path))
 
-        for input_path in sorted(data_dir.glob("*.city.json")):
+        for input_path in input_paths:
             with self.subTest(dataset=input_path.name):
                 print(f"Round-tripping real dataset: {input_path.name}", flush=True)
                 remove_scene_objects()
@@ -264,6 +388,10 @@ class BlenderIntegrationTests(unittest.TestCase):
                 ).execute()
 
                 self.assertEqual(import_result, {"FINISHED"})
+                mesh_count, attribute_count = self.assert_imported_attributes(source)
+                if external_path and input_path == Path(external_path):
+                    self.assertGreater(mesh_count, 0)
+                    self.assertGreater(attribute_count, 0)
                 imported_city_object_ids = {
                     obj.get("cityjson_id", obj.name)
                     for obj in bpy.data.objects
@@ -287,6 +415,12 @@ class BlenderIntegrationTests(unittest.TestCase):
                     set(exported["CityObjects"]), set(source["CityObjects"])
                 )
                 self.assertEqual(exported_geometry_count, source_geometry_count)
+                for object_id, city_object in source["CityObjects"].items():
+                    self.assertEqual(
+                        exported["CityObjects"][object_id].get("attributes", {}),
+                        city_object.get("attributes", {}),
+                        object_id,
+                    )
                 if "transform" in source:
                     self.assertEqual(exported["transform"], source["transform"])
                 for key in ("extensions", "appearance", "geometry-templates"):

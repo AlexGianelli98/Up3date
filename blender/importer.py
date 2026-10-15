@@ -252,16 +252,25 @@ class CityJSONImporter:
             obj = cast(ParsedCityObject, obj_value)
             city_object = create_empty_object(objid)
             city_object[CITYJSON_ID_PROPERTY] = objid
-            city_object = assign_properties(city_object, obj.to_dict())
+            properties = obj.to_dict()
+            attributes = properties.pop("attributes", {})
+            city_object = assign_properties(city_object, properties)
             new_objects.append(city_object)
             city_objects[objid] = city_object
 
             geometry_owner = cast(GeometryContainer, obj_value)
+            has_mesh = False
             for geometry_index, geometry in enumerate(geometry_owner.geometry):
                 geom_obj = self.parse_geometry(objid, obj, geometry, geometry_index)
                 geom_obj[CITYJSON_ID_PROPERTY] = objid
                 geom_obj.parent = city_object
+                if geom_obj.type == "MESH":
+                    assign_properties(geom_obj, {"attributes": attributes})
+                    has_mesh = True
                 new_objects.append(geom_obj)
+
+            if not has_mesh:
+                assign_properties(city_object, {"attributes": attributes})
 
             percentage = progress / progress_max * 100
             print(f"Importing: {percentage:.1f}% completed", end="\r")

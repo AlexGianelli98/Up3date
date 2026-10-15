@@ -157,6 +157,46 @@ class CityJSONExporter:
                     co.children = attribute
 
     @staticmethod
+    def export_mesh_attributes(
+        mesh_objects: dict[str, list[BlenderObject]], doc: CityJSONDocument
+    ) -> None:
+        """Restore attributes from mesh copies, rejecting conflicting values."""
+        missing = object()
+        for city_object_id, meshes in mesh_objects.items():
+            reference: dict[str, Any] | None = None
+            reference_mesh_name = ""
+            for mesh in meshes:
+                properties = {}
+                for key, value in mesh.items():
+                    if key.startswith("attributes."):
+                        if isinstance(value, idprop.types.IDPropertyArray):
+                            value = value.to_list()
+                        properties[key] = value
+
+                if reference is None:
+                    reference = properties
+                    reference_mesh_name = mesh.name
+                else:
+                    for key in sorted(reference.keys() | properties.keys()):
+                        if reference.get(key, missing) != properties.get(key, missing):
+                            raise ValueError(
+                                f"Conflicting CityJSON attribute {key!r} for "
+                                f"{city_object_id!r} between meshes "
+                                f"{reference_mesh_name!r} and {mesh.name!r}"
+                            )
+
+            if not reference:
+                continue
+            attributes: dict[str, Any] = {}
+            for key, value in reference.items():
+                parts = key.split(".")[1:]
+                target = attributes
+                for part in parts[:-1]:
+                    target = target.setdefault(part, {})
+                target[parts[-1]] = value
+            doc.city_objects[city_object_id].attributes = attributes
+
+    @staticmethod
     def create_mesh_structure(
         city_object: BlenderObject, objid: str, doc: CityJSONDocument
     ) -> tuple[str, VertexCollection, PolygonCollection]:
@@ -280,6 +320,7 @@ class CityJSONExporter:
         progress_max = len(bpy.data.objects)
         cj_next_index = 0
         vertex_indices: dict[tuple[float, float, float], int] = {}
+        mesh_objects: dict[str, list[BlenderObject]] = {}
 
         objects = cast(Iterable[BlenderObject], bpy.data.objects)
         for progress, city_object in enumerate(objects, start=1):
@@ -300,7 +341,7 @@ class CityJSONExporter:
                 city_object_model = cast(GeometryContainer, doc.city_objects[objid])
                 city_object_model.geometry.append(geometry)
 
-            # Empty objects contain the CityJSON attributes.
+            # Empty objects identify CityObjects and preserve legacy attributes.
             elif city_object.type == "EMPTY":
                 self.get_custom_properties(city_object, doc, objid)
 
@@ -309,6 +350,7 @@ class CityJSONExporter:
                 city_object_id, object_verts, object_faces = self.create_mesh_structure(
                     city_object, objid, doc
                 )
+                mesh_objects.setdefault(city_object_id, []).append(city_object)
 
                 cj_next_index = self.export_geometry_and_semantics(
                     city_object,
@@ -327,6 +369,7 @@ class CityJSONExporter:
                 end="\r",
             )
 
+        self.export_mesh_attributes(mesh_objects, doc)
         if self.check_for_duplicates:
             remove_vertex_duplicates(doc, self.precision)
         export_parent_child(doc)
